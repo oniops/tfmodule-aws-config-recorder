@@ -1,0 +1,27 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "DeliveryPutObject",
+      "Effect": "Allow",
+      "Action": "s3:PutObject",
+      "Resource": "arn:aws:s3:::${central_config_bucket}/AWSLogs/${account_id}/Config/*"
+    },
+    {
+      "Sid": "DeliveryGetBucketAcl",
+      "Effect": "Allow",
+      "Action": "s3:GetBucketAcl",
+      "Resource": "arn:aws:s3:::${central_config_bucket}"
+    },
+    {
+      "Sid": "DeliveryEncrypt",
+      "Effect": "Allow",
+      "Action": [
+        "kms:GenerateDataKey",
+        "kms:Decrypt",
+        "kms:DescribeKey"
+      ],
+      "Resource": "${central_config_kms_key_arn}"
+    }
+  ]
+}
