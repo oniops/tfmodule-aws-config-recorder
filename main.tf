@@ -10,8 +10,23 @@ locals {
 
   use_inclusion = !var.all_supported && !local.use_exclusion && length(var.resource_types) > 0
 
+  # Candidate types to pin to CONTINUOUS under a DAILY base: the AWS-mandated
+  # AWS::Config::* types plus the caller's curated baseline. Each is pinned ONLY
+  # when the active strategy actually records it, so a baseline entry outside an
+  # INCLUSION allow-list (or inside an EXCLUSION deny-list) is harmlessly skipped
+  # rather than producing an override for a non-recorded type.
+  baseline_continuous_candidates = distinct(concat(
+    local.daily_unsupported_types,
+    var.security_baseline_continuous_types,
+  ))
+
   baseline_overrides = var.recording_frequency == "DAILY" ? {
-    for t in var.security_baseline_continuous_types : t => "CONTINUOUS"
+    for t in local.baseline_continuous_candidates : t => "CONTINUOUS"
+    if(
+      var.all_supported
+      || (local.use_inclusion && contains(var.resource_types, t))
+      || (local.use_exclusion && !contains(var.excluded_resource_types, t))
+    )
   } : {}
 
   effective_frequencies = {

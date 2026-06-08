@@ -17,13 +17,13 @@ It supports the three mutually exclusive recording strategies — **ALL_SUPPORTE
 ```
   Member account (this module)                 Central account (OpsnowLog / SGUARD)
   ┌───────────────────────────────┐
-  │ Config Recorder               │            ┌─────────────────────────────────┐
-  │   └─ recording group / mode   │            │  organization-config-s3 (bucket) │
-  │ Delivery Channel ─────────────┼── SSE-KMS ─▶│    AWSLogs/<account_id>/Config/* │
-  │ IAM Role (OrganizationAWS…)   │   PutObject │  central CMK (key policy trusts  │
-  │   └─ inline delivery policy   │◀── KMS ─────│    .../OrganizationAWSConfigRole)│
-  │ Aggregate Authorization ──────┼─────────────▶  Config Aggregator (SGUARD)     │
-  └───────────────────────────────┘   read      └─────────────────────────────────┘
+  │ Config Recorder               │              ┌──────────────────────────────────┐
+  │   └─ recording group / mode   │              │  organization-config-s3 (bucket) │
+  │ Delivery Channel ─────────────┼── SSE-KMS ─▶ │    AWSLogs/<account_id>/Config/* │
+  │ IAM Role (OrganizationAWS…)   │   PutObject  │  central CMK (key policy trusts  │
+  │   └─ inline delivery policy   │◀── KMS ───── │    .../OrganizationAWSConfigRole)│
+  │ Aggregate Authorization ──────┼─────────────▶│  Config Aggregator (SGUARD)      │
+  └───────────────────────────────┘   read       └──────────────────────────────────┘
 ```
 
 - **Delivery** — the recorder hands snapshots/history to the Delivery Channel, which writes to `s3://<central_config_bucket>/AWSLogs/<account_id>/Config/*`, encrypted with the central CMK.
@@ -86,9 +86,8 @@ module "config_recorder" {
   central_config_bucket      = "organization-config-s3"
   central_config_kms_key_arn = "arn:aws:kms:ap-northeast-2:111122223333:key/abcd1234-..."
 
-  # Scenario A: ALL_SUPPORTED + DAILY (cost-first). Pin the AWS-mandated
-  # CONTINUOUS-only types and authorize the central Aggregator.
-  security_baseline_continuous_types = []
+  # Scenario A: ALL_SUPPORTED + DAILY (cost-first). The AWS-mandated
+  # CONTINUOUS-only AWS::Config::* types are auto-pinned by the module.
   enable_aggregate_authorization = true
 
   tags = { ManagedBy = "terraform" }
@@ -110,7 +109,6 @@ module "config_recorder" {
 
   include_global_resource_types = false # home region records globals; this region skips them
 
-  security_baseline_continuous_types = []
   enable_aggregate_authorization = true # authorization is per-region
 }
 ```
@@ -135,7 +133,7 @@ module "config_recorder" {
 
 ### D. Cost-optimized dev / sandbox account
 
-`DAILY` everywhere except the mandatory `AWS::Config::*` types, slowest snapshot cadence, and optionally drop high-churn types.
+`DAILY` everywhere (the mandatory `AWS::Config::*` types are auto-pinned to `CONTINUOUS`), slowest snapshot cadence.
 
 ```hcl
 module "config_recorder" {
@@ -147,8 +145,6 @@ module "config_recorder" {
 
   recording_frequency         = "DAILY"
   snapshot_delivery_frequency = "TwentyFour_Hours"
-
-  security_baseline_continuous_types = []
 }
 ```
 
@@ -188,7 +184,6 @@ module "config_recorder" {
   central_config_bucket      = "organization-config-s3"
   central_config_kms_key_arn = "arn:aws:kms:ap-northeast-2:111122223333:key/abcd1234-..."
 
-  security_baseline_continuous_types = []
   # enable_aggregate_authorization defaults to false
 }
 ```
@@ -215,7 +210,7 @@ The three strategies are mutually exclusive. The examples below show the mechani
 
 ### All supported resource types (default)
 
-`all_supported = true` (the default) records every current and future supported type, including global resources (IAM, etc.). With `recording_frequency = "DAILY"` the `AWS::Config::*` types that AWS forbids from `DAILY` must be pinned to `CONTINUOUS` via `security_baseline_continuous_types`. See the [Quick start](#quick-start) for a full example.
+`all_supported = true` (the default) records every current and future supported type, including global resources (IAM, etc.). With `recording_frequency = "DAILY"` the `AWS::Config::*` types that AWS forbids from `DAILY` are auto-pinned to `CONTINUOUS` by the module — no extra input needed. See the [Quick start](#quick-start) for a full example.
 
 ### Inclusion strategy (explicit allow-list)
 
@@ -263,7 +258,7 @@ module "config_recorder" {
 
 ### Per-type frequency overrides
 
-`DAILY` base for cost, with selected high-value types pinned to `CONTINUOUS`. Resolution order (later wins): base `recording_frequency` → `security_baseline_continuous_types` → `recording_frequencies`.
+`DAILY` base for cost, with selected high-value types pinned to `CONTINUOUS`. The mandatory `AWS::Config::*` types are auto-pinned; use `security_baseline_continuous_types` for an additional curated baseline and `recording_frequencies` for ad-hoc per-type overrides. Resolution order (later wins): base `recording_frequency` → auto-pinned `AWS::Config::*` → `security_baseline_continuous_types` → `recording_frequencies`.
 
 ```hcl
 module "config_recorder" {
@@ -276,15 +271,14 @@ module "config_recorder" {
 
   recording_frequency = "DAILY"
 
+  # AWS::Config::* mandatory types are auto-pinned; add your own baseline here.
   security_baseline_continuous_types = [
-    "AWS::Config::ConfigurationRecorder",
-    "AWS::Config::ConformancePackCompliance",
-    "AWS::Config::ResourceCompliance"
+    "AWS::CloudTrail::Trail",
+    "AWS::EC2::SecurityGroup",
   ]
 
   recording_frequencies = {
-    "AWS::EC2::SecurityGroup" = "CONTINUOUS"
-    "AWS::IAM::Role"          = "CONTINUOUS"
+    "AWS::IAM::Role" = "CONTINUOUS"
   }
 }
 ```
@@ -332,7 +326,7 @@ module "config_recorder" {
 | recorder_enabled                     | Whether the recorder is started. Set `false` to pause recording without destroying the recorder/channel.    | `bool`         | `true`             |    no    |
 | snapshot_delivery_frequency          | Delivery Channel snapshot cadence — `One_Hour`/`Three_Hours`/`Six_Hours`/`Twelve_Hours`/`TwentyFour_Hours`. | `string`       | `"Twelve_Hours"`   |    no    |
 | recording_frequencies                | Per-type frequency override map (`AWS::Service::Type` → `CONTINUOUS`/`DAILY`). Keys must not overlap excludes. | `map(string)`  | `{}`               |    no    |
-| security_baseline_continuous_types   | Types pinned to `CONTINUOUS` when base = `DAILY`. Must include the 3 `AWS::Config::*` DAILY-forbidden types. | `list(string)` | `[]`               |    no    |
+| security_baseline_continuous_types   | Types pinned to `CONTINUOUS` when base = `DAILY` (only if actually recorded). Defaults to the 3 `AWS::Config::*` types that AWS supports in CONTINUOUS mode only; append your own high-value types. | `list(string)` | 3 `AWS::Config::*` types | no |
 | enable_aggregate_authorization       | Workload-only `true`. Issues an aggregate authorization for the central Aggregator.                          | `bool`         | `false`            |    no    |
 | aggregator_account_id                | Account ID of the central Aggregator (SGUARD).                                                              | `string`       | `"276503685119"`   |    no    |
 | aggregator_region                    | Home region of the central Aggregator.                                                                      | `string`       | `"ap-northeast-2"` |    no    |
@@ -350,8 +344,8 @@ module "config_recorder" {
 ## Notes
 
 - **Strategy mutual exclusion.** `all_supported`, `resource_types` (INCLUSION), and `excluded_resource_types` (EXCLUSION) are mutually exclusive — set at most one of the latter two, and only when `all_supported = false`. Enforced as `precondition` blocks in `main.tf` (Terraform 1.5.x cannot reference other variables inside a variable `validation`).
-- **DAILY-forbidden types.** When `recording_frequency = "DAILY"`, the three `AWS::Config::*` internal compliance types (`ConfigurationRecorder`, `ConformancePackCompliance`, `ResourceCompliance`) must be pinned to `CONTINUOUS` for every such type actually recorded — otherwise AWS rejects the apply. A precondition validates this.
-- **INCLUSION overrides.** In INCLUSION mode, every type in `recording_frequencies` / `security_baseline_continuous_types` must also be in `resource_types`; a recording-mode override cannot target a non-recorded type (enforced by precondition).
+- **DAILY-forbidden types.** When `recording_frequency = "DAILY"`, the three `AWS::Config::*` internal compliance types (`ConfigurationRecorder`, `ConformancePackCompliance`, `ResourceCompliance`) are **auto-pinned to `CONTINUOUS`** by the module for every such type actually recorded — otherwise AWS rejects the apply. A precondition still guards against an explicit `recording_frequencies` entry that would force one of them back to `DAILY`.
+- **INCLUSION overrides.** In INCLUSION mode, every `recording_frequencies` key must also be in `resource_types` — a recording-mode override cannot target a non-recorded type (enforced by precondition). `security_baseline_continuous_types` entries outside the allow-list are harmlessly skipped (not pinned), so the default `AWS::Config::*` baseline is safe in INCLUSION mode.
 - **KMS key ARN, not alias.** `central_config_kms_key_arn` must be a key ARN (`arn:aws:kms:<region>:<account>:key/<id>`) — `aws_config_delivery_channel.s3_kms_key_arn` rejects alias ARNs.
 - **Apply ordering.** Delivery Channel depends on the recorder and the inline delivery IAM policy; the recorder status (enable) depends on the Delivery Channel — AWS rejects enabling a recorder with no channel.
 - **Aggregation ordering.** Apply the workload account first (issue authorization), then register the account on the delegated-admin aggregator. Reversed ordering causes a transient finding gap until AWS eventual consistency catches up.
