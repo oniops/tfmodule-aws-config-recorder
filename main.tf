@@ -10,15 +10,26 @@ locals {
 
   use_inclusion = !var.all_supported && !local.use_exclusion && length(var.resource_types) > 0
 
-  # Candidate types to pin to CONTINUOUS under a DAILY base: the AWS-mandated
-  # AWS::Config::* types plus the caller's curated baseline. Each is pinned ONLY
-  # when the active strategy actually records it, so a baseline entry outside an
-  # INCLUSION allow-list (or inside an EXCLUSION deny-list) is harmlessly skipped
-  # rather than producing an override for a non-recorded type.
-  baseline_continuous_candidates = distinct(concat(
-    local.daily_unsupported_types,
-    var.security_baseline_continuous_types,
-  ))
+  # AWS::Config::* internal compliance types are SYSTEM resource types: AWS records
+  # them continuously by default and REJECTS any attempt to list them in a recording
+  # group or recording-mode override ("Failed to add ... this is a system resource
+  # type of AWS Config. The recording of this type is enabled by default."). They
+  # must never be emitted - not included, not excluded, not pinned, not overridden.
+  system_recorded_types = [
+    "AWS::Config::ConfigurationRecorder",
+    "AWS::Config::ConformancePackCompliance",
+    "AWS::Config::ResourceCompliance",
+  ]
+
+  # Caller-curated CONTINUOUS baseline. System types are dropped defensively (the
+  # precondition below already rejects them with a clear message). Each remaining
+  # type is pinned ONLY when the active strategy actually records it, so a baseline
+  # entry outside an INCLUSION allow-list (or inside an EXCLUSION deny-list) is
+  # harmlessly skipped rather than producing an override for a non-recorded type.
+  baseline_continuous_candidates = distinct([
+    for t in var.security_baseline_continuous_types : t
+    if !contains(local.system_recorded_types, t)
+  ])
 
   baseline_overrides = var.recording_frequency == "DAILY" ? {
     for t in local.baseline_continuous_candidates : t => "CONTINUOUS"
@@ -32,7 +43,7 @@ locals {
   effective_frequencies = {
     for t, f in merge(local.baseline_overrides, var.recording_frequencies) :
     t => f
-    if !contains(var.excluded_resource_types, t)
+    if !contains(var.excluded_resource_types, t) && !contains(local.system_recorded_types, t)
   }
 
   override_frequencies = distinct([
@@ -49,26 +60,6 @@ locals {
   ]
 
   recorder_name = "${local.name_prefix}-config-recorder"
-
-  # AWS::Config::* internal compliance types that AWS forbids from DAILY
-  # recording (must be CONTINUOUS). See config-recorder-supported-resource-types.md.
-  daily_unsupported_types = [
-    "AWS::Config::ConfigurationRecorder",
-    "AWS::Config::ConformancePackCompliance",
-    "AWS::Config::ResourceCompliance",
-  ]
-
-  # Subset of the forbidden types that this recorder actually records, given the
-  # active strategy. ALL_SUPPORTED records everything; INCLUSION only the
-  # allow-list; EXCLUSION everything except the deny-list.
-  recorded_daily_unsupported = [
-    for t in local.daily_unsupported_types : t
-    if(
-      var.all_supported
-      || (local.use_inclusion && contains(var.resource_types, t))
-      || (local.use_exclusion && !contains(var.excluded_resource_types, t))
-    )
-  ]
 }
 
 resource "aws_config_configuration_recorder" "this" {
@@ -138,12 +129,20 @@ resource "aws_config_configuration_recorder" "this" {
       condition     = !local.use_inclusion || length(setsubtract(toset(keys(local.effective_frequencies)), toset(var.resource_types))) == 0
       error_message = "In INCLUSION mode, all recording_frequencies keys and security_baseline_continuous_types must also appear in resource_types - a recording-mode override cannot target a non-recorded type."
     }
-    # DAILY base: the AWS::Config::* internal compliance types that AWS forbids from
-    # DAILY recording must be pinned to CONTINUOUS (via security_baseline_continuous_types
-    # or recording_frequencies) for every such type this recorder actually records.
+    # System resource types: AWS records the AWS::Config::* internal compliance types
+    # continuously by default and rejects them in any recording group or recording-mode
+    # override. They must not appear in any caller input.
     precondition {
-      condition     = var.recording_frequency != "DAILY" || alltrue([for t in local.recorded_daily_unsupported : lookup(local.effective_frequencies, t, "DAILY") == "CONTINUOUS"])
-      error_message = "When recording_frequency = DAILY, the AWS::Config::* types AWS forbids from DAILY recording (ConfigurationRecorder, ConformancePackCompliance, ResourceCompliance) must be pinned to CONTINUOUS via security_baseline_continuous_types or recording_frequencies."
+      condition = length(setintersection(
+        toset(local.system_recorded_types),
+        toset(concat(
+          var.resource_types,
+          var.excluded_resource_types,
+          keys(var.recording_frequencies),
+          var.security_baseline_continuous_types,
+        )),
+      )) == 0
+      error_message = "AWS::Config::ConfigurationRecorder / ConformancePackCompliance / ResourceCompliance are system resource types that AWS records continuously by default and forbids in any recording group or recording-mode override. Remove them from resource_types, excluded_resource_types, recording_frequencies, and security_baseline_continuous_types."
     }
   }
 }

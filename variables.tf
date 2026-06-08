@@ -138,30 +138,22 @@ variable "recording_frequencies" {
 }
 
 variable "security_baseline_continuous_types" {
-  type = list(string)
-  default = [
-    "AWS::Config::ConfigurationRecorder",
-    "AWS::Config::ConformancePackCompliance",
-    "AWS::Config::ResourceCompliance"
-  ]
+  type        = list(string)
+  default     = []
   description = <<-DESC
     List of AWS::Service::Type identifiers pinned to CONTINUOUS frequency when
     recording_frequency base = DAILY. Each entry is pinned ONLY if the active
     strategy actually records it (an entry outside an INCLUSION allow-list, or
     inside an EXCLUSION deny-list, is harmlessly skipped).
 
-    The default holds the three AWS::Config::* compliance types that the AWS API
-    supports in CONTINUOUS mode ONLY - it rejects DAILY recording for them:
-      - AWS::Config::ConfigurationRecorder
-      - AWS::Config::ConformancePackCompliance
-      - AWS::Config::ResourceCompliance
-    Keep these whenever base = DAILY (the module also auto-pins them as a safety
-    net) and append any additional high-value types you want recorded
-    continuously.
+    Do NOT list the AWS::Config::* internal compliance types here
+    (ConfigurationRecorder, ConformancePackCompliance, ResourceCompliance): AWS
+    records them continuously by default and rejects them in any recording group
+    or recording-mode override, so the module neither pins nor emits them (a
+    precondition rejects them with a clear message).
 
     Resolution order (later wins): base recording_frequency -> this list ->
-    recording_frequencies. NOTE: do not set any of the three AWS::Config::* types
-    to DAILY via recording_frequencies - a precondition rejects it.
+    recording_frequencies.
   DESC
   validation {
     condition     = alltrue([for t in var.security_baseline_continuous_types : can(regex("^AWS::[A-Za-z0-9]+::[A-Za-z0-9]+$", t))])
