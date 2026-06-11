@@ -30,14 +30,27 @@ variable "context" {
 
 variable "config_role_name" {
   type        = string
-  default     = "OrganizationAWSConfigRole"
-  description = "Name of the AWS Config service IAM role. Intentionally an organization-standard, unprefixed name so every member account gets the same role name - enabling a single cross-account pattern (arn:aws:iam::*:role/OrganizationAWSConfigRole) in the central bucket/KMS key policies."
+  default     = null # "OrganizationAWSConfigRole"
+  description = "Name of the AWS Config service IAM role. Intentionally an organization-standard, unprefixed name so every member account gets the same role name - enabling a single cross-account pattern (arn:aws:iam::*:role/OrganizationAWSConfigRole) in the central bucket/KMS key policies. Leave null/empty to skip creating a custom role and use the AWS service-linked role AWSServiceRoleForConfig instead (see create_config_service_linked_role)."
+}
+
+variable "create_config_service_linked_role" {
+  type        = bool
+  default     = true
+  description = <<-DESC
+    Only relevant when config_role_name is null/empty (no custom role). When true
+    (default), the module creates the AWS Config service-linked role
+    AWSServiceRoleForConfig and points the recorder at it. Set false when the
+    account already has this service-linked role - the module then references its
+    ARN without trying to recreate it (aws_iam_service_linked_role fails on an
+    already-existing SLR). Ignored when config_role_name is set.
+  DESC
 }
 
 variable "config_policy_name" {
   type        = string
   default     = "OrganizationAWSConfigDeliveryPolicy"
-  description = "Name of the inline IAM policy attached to the Config service role that grants cross-account delivery (s3:PutObject / s3:GetBucketAcl on the central bucket + kms:GenerateDataKey on its CMK). Organization-standard, unprefixed name kept consistent across every member account."
+  description = "Name of the inline IAM policy attached to the Config service role that grants cross-account delivery (s3:PutObject / s3:GetBucketAcl on the central bucket). Organization-standard, unprefixed name kept consistent across every member account. Only created when a custom role is used (config_role_name set)."
 }
 
 variable "all_supported" {
@@ -164,15 +177,6 @@ variable "security_baseline_continuous_types" {
 variable "central_config_bucket" {
   type        = string
   description = "Name of the central Config bucket (OpsnowLog organization-config-s3). Snapshot/History deliveries land in s3://<bucket>/AWSLogs/<account_id>/Config/..."
-}
-
-variable "central_config_kms_key_arn" {
-  type        = string
-  description = "SSE-KMS CMK key ARN (arn:aws:kms:<region>:<account>:key/<id>) for the central Config bucket. Must be a key ARN, NOT an alias ARN - aws_config_delivery_channel.s3_kms_key_arn rejects alias ARNs. The recorder role is granted kms:GenerateDataKey on this key for cross-account delivery."
-  validation {
-    condition     = can(regex("^arn:aws[a-z-]*:kms:[a-z0-9-]+:[0-9]{12}:key/.+$", var.central_config_kms_key_arn))
-    error_message = "central_config_kms_key_arn must be a KMS key ARN (arn:aws:kms:<region>:<account>:key/<id>), not an alias ARN."
-  }
 }
 
 variable "enable_aggregate_authorization" {

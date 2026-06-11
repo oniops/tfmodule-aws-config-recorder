@@ -64,7 +64,7 @@ locals {
 
 resource "aws_config_configuration_recorder" "this" {
   name     = local.recorder_name
-  role_arn = aws_iam_role.this.arn
+  role_arn = local.config_role_arn
 
   recording_group {
     all_supported = var.all_supported

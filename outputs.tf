@@ -9,8 +9,8 @@ output "delivery_channel_name" {
 }
 
 output "iam_role_arn" {
-  description = "ARN of the AWS Config service role created in this account."
-  value       = aws_iam_role.this.arn
+  description = "ARN of the AWS Config service role used by the recorder - the custom role when config_role_name is set, otherwise the AWSServiceRoleForConfig service-linked role."
+  value       = local.config_role_arn
 }
 
 output "aggregate_authorization_arn" {

@@ -21,21 +21,62 @@ It supports the three mutually exclusive recording strategies — **ALL_SUPPORTE
   │   └─ recording group / mode   │              │  organization-config-s3 (bucket) │
   │ Delivery Channel ─────────────┼── SSE-KMS ─▶ │    AWSLogs/<account_id>/Config/* │
   │ IAM Role (OrganizationAWS…)   │   PutObject  │  central CMK (key policy trusts  │
-  │   └─ inline delivery policy   │◀── KMS ───── │    .../OrganizationAWSConfigRole)│
+  │   └─ inline delivery policy   │◀── KMS ───── │    config.amazonaws.com)         │
   │ Aggregate Authorization ──────┼─────────────▶│  Config Aggregator (SGUARD)      │
   └───────────────────────────────┘   read       └──────────────────────────────────┘
 ```
 
-- **Delivery** — the recorder hands snapshots/history to the Delivery Channel, which writes to `s3://<central_config_bucket>/AWSLogs/<account_id>/Config/*`, encrypted with the central CMK.
-- **Two-way KMS/role coupling** — this module grants the role `kms:GenerateDataKey` on the CMK; the central CMK key policy must trust the org-standard role ARN (`arn:aws:iam::*:role/OrganizationAWSConfigRole`).
+- **Delivery** — the recorder hands snapshots/history to the Delivery Channel, which writes to `s3://<central_config_bucket>/AWSLogs/<account_id>/Config/*`, encrypted with the central bucket's default SSE-KMS key.
+- **Service-principal access** — AWS Config delivers as the service principal `config.amazonaws.com`. The central bucket policy and central CMK key policy grant this principal (scoped by `aws:SourceAccount = <member account id>`), so the module needs no KMS input and grants no per-key IAM permission. This works for both the custom role and the service-linked role (`AWSServiceRoleForConfig`).
 - **Aggregation** — workload accounts issue an aggregate authorization so the central Aggregator can read their Config data.
+
+### Delivery flow
+
+How a configuration change becomes an encrypted object in the central bucket:
+
+```mermaid
+flowchart TD
+    subgraph member["Member account (this module)"]
+        res["AWS resources<br/>(EC2, IAM, S3, ...)"]
+        rec["Config Recorder<br/>recording group / mode"]
+        chan["Delivery Channel<br/>(snapshot + history)"]
+    end
+
+    subgraph svc["AWS Config service"]
+        sp["Service principal<br/>config.amazonaws.com"]
+    end
+
+    subgraph central["Central account (OpsnowLog / SGUARD)"]
+        cmk["Central CMK<br/>key policy allows config.amazonaws.com<br/>(aws:SourceAccount = member id)"]
+        s3["organization-config-s3<br/>AWSLogs/&lt;account_id&gt;/Config/*<br/>default SSE-KMS"]
+        agg["Config Aggregator"]
+    end
+
+    res -->|1. detect config change| rec
+    rec -->|2. snapshot / history| chan
+    chan -->|3. deliver as service principal| sp
+    sp -->|4. GenerateDataKey| cmk
+    cmk -->|5. data key| sp
+    sp -->|6. PutObject SSE-KMS encrypted| s3
+    s3 -.->|7. aggregate authorization grants read| agg
+```
 
 ## Prerequisites
 
-1. **Central S3 bucket** (`central_config_bucket`) exists, with a bucket policy that allows `s3:PutObject` / `s3:GetBucketAcl` from the member-account role and enforces the central CMK.
-2. **Central KMS CMK** (`central_config_kms_key_arn`, a **key ARN** — not an alias ARN) whose key policy trusts `arn:aws:iam::*:role/OrganizationAWSConfigRole`.
+1. **Central S3 bucket** (`central_config_bucket`) exists, with a bucket policy that allows `s3:PutObject` / `s3:GetBucketAcl` for `config.amazonaws.com` (scoped by `aws:SourceAccount`), and a default SSE-KMS encryption.
+2. **Central CMK key policy** grants `config.amazonaws.com` (`kms:GenerateDataKey` / `kms:Decrypt`, scoped by `aws:SourceAccount`) so delivered objects can be encrypted with the bucket's default key.
 3. The caller configures the **AWS provider** for the target member account/region (this module declares no `provider` block).
 4. Apply **once per member account per region**.
+5. **Service-linked role check** — when `config_role_name` is empty (service-linked-role mode), verify up front whether the account already has `AWSServiceRoleForConfig`. Terraform cannot detect this at plan time, and `aws_iam_service_linked_role` fails if the role already exists. Run:
+
+   ```bash
+   aws iam get-role --role-name AWSServiceRoleForConfig
+   ```
+
+   - **`NoSuchEntity` error** → the role does not exist → keep `create_config_service_linked_role = true` (default) so the module creates it.
+   - **Role details returned** → the role already exists → set `create_config_service_linked_role = false` so the module references it instead of recreating it.
+
+   Skip this check when `config_role_name` is set (the module manages its own custom role).
 
 ## Deployment scenarios (member accounts)
 
@@ -84,8 +125,6 @@ module "config_recorder" {
   context = module.ctx.context
 
   central_config_bucket      = "organization-config-s3"
-  central_config_kms_key_arn = "arn:aws:kms:ap-northeast-2:111122223333:key/abcd1234-..."
-
   # Scenario A: ALL_SUPPORTED + DAILY (cost-first). The AWS-mandated
   # CONTINUOUS-only AWS::Config::* types are auto-pinned by the module.
   enable_aggregate_authorization = true
@@ -104,11 +143,7 @@ module "config_recorder" {
   # provider configured for the secondary region, e.g. us-east-1
 
   context = module.ctx.context # ctx module region = "us-east-1"
-  central_config_bucket      = "organization-config-s3"
-  central_config_kms_key_arn = "arn:aws:kms:us-east-1:111122223333:key/abcd1234-..."
-
-  include_global_resource_types = false # home region records globals; this region skips them
-
+  central_config_bucket      = "organization-config-s3"  include_global_resource_types = false # home region records globals; this region skips them
   enable_aggregate_authorization = true # authorization is per-region
 }
 ```
@@ -123,8 +158,6 @@ module "config_recorder" {
 
   context = module.ctx.context
   central_config_bucket      = "organization-config-s3"
-  central_config_kms_key_arn = "arn:aws:kms:ap-northeast-2:111122223333:key/abcd1234-..."
-
   recording_frequency         = "CONTINUOUS" # base CONTINUOUS; no DAILY-forbidden-type pinning needed
   snapshot_delivery_frequency = "Three_Hours"
   enable_aggregate_authorization = true
@@ -141,8 +174,6 @@ module "config_recorder" {
 
   context = module.ctx.context
   central_config_bucket      = "organization-config-s3"
-  central_config_kms_key_arn = "arn:aws:kms:ap-northeast-2:111122223333:key/abcd1234-..."
-
   recording_frequency         = "DAILY"
   snapshot_delivery_frequency = "TwentyFour_Hours"
 }
@@ -158,8 +189,6 @@ module "config_recorder" {
 
   context = module.ctx.context
   central_config_bucket      = "organization-config-s3"
-  central_config_kms_key_arn = "arn:aws:kms:ap-northeast-2:111122223333:key/abcd1234-..."
-
   all_supported = false
   resource_types = [
     "AWS::EC2::SecurityGroup",
@@ -182,8 +211,6 @@ module "config_recorder" {
 
   context = module.ctx.context
   central_config_bucket      = "organization-config-s3"
-  central_config_kms_key_arn = "arn:aws:kms:ap-northeast-2:111122223333:key/abcd1234-..."
-
   # enable_aggregate_authorization defaults to false
 }
 ```
@@ -198,8 +225,6 @@ module "config_recorder" {
 
   context = module.ctx.context
   central_config_bucket      = "organization-config-s3"
-  central_config_kms_key_arn = "arn:aws:kms:ap-northeast-2:111122223333:key/abcd1234-..."
-
   recorder_enabled = false
 }
 ```
@@ -223,8 +248,6 @@ module "config_recorder" {
   context = module.ctx.context
 
   central_config_bucket      = "organization-config-s3"
-  central_config_kms_key_arn = "arn:aws:kms:ap-northeast-2:111122223333:key/abcd1234-..."
-
   all_supported = false
   resource_types = [
     "AWS::EC2::Instance",
@@ -247,8 +270,6 @@ module "config_recorder" {
   context = module.ctx.context
 
   central_config_bucket      = "organization-config-s3"
-  central_config_kms_key_arn = "arn:aws:kms:ap-northeast-2:111122223333:key/abcd1234-..."
-
   all_supported = false
   excluded_resource_types = [
     "AWS::EC2::NetworkInterface",
@@ -267,8 +288,6 @@ module "config_recorder" {
   context = module.ctx.context
 
   central_config_bucket      = "organization-config-s3"
-  central_config_kms_key_arn = "arn:aws:kms:ap-northeast-2:111122223333:key/abcd1234-..."
-
   recording_frequency = "DAILY"
 
   # AWS::Config::* mandatory types are auto-pinned; add your own baseline here.
@@ -303,9 +322,10 @@ module "config_recorder" {
 | `aws_config_configuration_recorder.this`        | resource    |
 | `aws_config_configuration_recorder_status.this` | resource    |
 | `aws_config_delivery_channel.this`              | resource    |
-| `aws_iam_role.this`                             | resource    |
-| `aws_iam_role_policy.this`                      | resource    |
-| `aws_iam_role_policy_attachment.this`           | resource    |
+| `aws_iam_role.this`                             | resource (count) |
+| `aws_iam_role_policy.this`                      | resource (count) |
+| `aws_iam_role_policy_attachment.this`           | resource (count) |
+| `aws_iam_service_linked_role.config`            | resource (count) |
 | `aws_config_aggregate_authorization.to_aggregator` | resource (count) |
 | `aws_iam_policy_document.config_trust`          | data source |
 
@@ -315,8 +335,8 @@ module "config_recorder" {
 | ------------------------------------ | ------------------------------------------------------------------------------------------------------------ | -------------- | ------------------ | :------: |
 | context                              | Standardized naming/attribute object, normally `module.ctx.context` from [`tfmodule-context`](#context-module-tfmodule-context) (`region`, `project`, `name_prefix`, `pri_domain`, `account_id`, `tags`). `name_prefix` names resources; `account_id` (12-digit) scopes the S3 delivery prefix and the trust-policy `aws:SourceAccount`. | `object`       | n/a                |   yes    |
 | central_config_bucket                | Name of the central Config S3 bucket. Deliveries land in `s3://<bucket>/AWSLogs/<account_id>/Config/...`.    | `string`       | n/a                |   yes    |
-| central_config_kms_key_arn           | SSE-KMS CMK **key ARN** (not alias ARN) for the central bucket. Used by the delivery channel and granted to the role. | `string`       | n/a                |   yes    |
-| config_role_name                     | Name of the Config service IAM role. Org-standard, unprefixed — same name in every member account.          | `string`       | `"OrganizationAWSConfigRole"` | no |
+| config_role_name                     | Name of the custom Config service IAM role. Org-standard, unprefixed — same name in every member account. Leave `null`/empty to skip the custom role and use the service-linked role `AWSServiceRoleForConfig` instead. | `string` | `null` | no |
+| create_config_service_linked_role    | Only when `config_role_name` is empty: create the `AWSServiceRoleForConfig` service-linked role (`true`, default) or reference an existing one by ARN (`false`). Ignored when a custom role is used. | `bool` | `true` | no |
 | config_policy_name                   | Name of the inline cross-account delivery policy on the role. Org-standard, unprefixed.                     | `string`       | `"OrganizationAWSConfigDeliveryPolicy"` | no |
 | all_supported                        | ALL_SUPPORTED strategy. When `true`, `resource_types` / `excluded_resource_types` must be empty.            | `bool`         | `true`             |    no    |
 | include_global_resource_types        | Record global types (IAM, etc.). Honored only when `all_supported = true`; forced `false` otherwise.        | `bool`         | `true`             |    no    |
@@ -346,7 +366,7 @@ module "config_recorder" {
 - **Strategy mutual exclusion.** `all_supported`, `resource_types` (INCLUSION), and `excluded_resource_types` (EXCLUSION) are mutually exclusive — set at most one of the latter two, and only when `all_supported = false`. Enforced as `precondition` blocks in `main.tf` (Terraform 1.5.x cannot reference other variables inside a variable `validation`).
 - **System resource types.** The three `AWS::Config::*` internal compliance types (`ConfigurationRecorder`, `ConformancePackCompliance`, `ResourceCompliance`) are recorded **continuously by default** by AWS and **cannot** be listed in a recording group or recording-mode override — AWS rejects the apply (`...this is a system resource type of AWS Config. The recording of this type is enabled by default.`). The module never emits them, and a `precondition` rejects them if passed via `resource_types`, `excluded_resource_types`, `recording_frequencies`, or `security_baseline_continuous_types`.
 - **INCLUSION overrides.** In INCLUSION mode, every `recording_frequencies` key must also be in `resource_types` — a recording-mode override cannot target a non-recorded type (enforced by precondition). `security_baseline_continuous_types` entries outside the allow-list are harmlessly skipped (not pinned).
-- **KMS key ARN, not alias.** `central_config_kms_key_arn` must be a key ARN (`arn:aws:kms:<region>:<account>:key/<id>`) — `aws_config_delivery_channel.s3_kms_key_arn` rejects alias ARNs.
+- **Encryption via service principal.** Delivered objects are encrypted with the central bucket's default SSE-KMS key. The module passes no KMS key to the delivery channel and grants no per-key IAM permission — the central CMK key policy must authorize `config.amazonaws.com` (`kms:GenerateDataKey` / `kms:Decrypt`, scoped by `aws:SourceAccount`).
 - **Apply ordering.** Delivery Channel depends on the recorder and the inline delivery IAM policy; the recorder status (enable) depends on the Delivery Channel — AWS rejects enabling a recorder with no channel.
 - **Aggregation ordering.** Apply the workload account first (issue authorization), then register the account on the delegated-admin aggregator. Reversed ordering causes a transient finding gap until AWS eventual consistency catches up.
 - **Global resources & multi-region.** For multi-region ALL_SUPPORTED accounts, set `include_global_resource_types = false` on non-home regions to avoid recording (and paying for) global resources in every region.
