@@ -36,10 +36,10 @@ variable "config_role_name" {
 
 variable "create_config_service_linked_role" {
   type        = bool
-  default     = true
+  default     = false
   description = <<-DESC
-    Only relevant when config_role_name is null/empty (no custom role). When true
-    (default), the module creates the AWS Config service-linked role
+    Only relevant when config_role_name is null/empty (no custom role). When true,
+    the module creates the AWS Config service-linked role
     AWSServiceRoleForConfig and points the recorder at it. Set false when the
     account already has this service-linked role - the module then references its
     ARN without trying to recreate it (aws_iam_service_linked_role fails on an

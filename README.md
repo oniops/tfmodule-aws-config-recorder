@@ -73,8 +73,8 @@ flowchart TD
    aws iam get-role --role-name AWSServiceRoleForConfig
    ```
 
-   - **`NoSuchEntity` error** → the role does not exist → keep `create_config_service_linked_role = true` (default) so the module creates it.
-   - **Role details returned** → the role already exists → set `create_config_service_linked_role = false` so the module references it instead of recreating it.
+   - **`NoSuchEntity` error** → the role does not exist → set `create_config_service_linked_role = true` so the module creates it.
+   - **Role details returned** → the role already exists → keep `create_config_service_linked_role = false` (default) so the module references it instead of recreating it.
 
    Skip this check when `config_role_name` is set (the module manages its own custom role).
 
@@ -336,7 +336,7 @@ module "config_recorder" {
 | context                              | Standardized naming/attribute object, normally `module.ctx.context` from [`tfmodule-context`](#context-module-tfmodule-context) (`region`, `project`, `name_prefix`, `pri_domain`, `account_id`, `tags`). `name_prefix` names resources; `account_id` (12-digit) scopes the S3 delivery prefix and the trust-policy `aws:SourceAccount`. | `object`       | n/a                |   yes    |
 | central_config_bucket                | Name of the central Config S3 bucket. Deliveries land in `s3://<bucket>/AWSLogs/<account_id>/Config/...`.    | `string`       | n/a                |   yes    |
 | config_role_name                     | Name of the custom Config service IAM role. Org-standard, unprefixed — same name in every member account. Leave `null`/empty to skip the custom role and use the service-linked role `AWSServiceRoleForConfig` instead. | `string` | `null` | no |
-| create_config_service_linked_role    | Only when `config_role_name` is empty: create the `AWSServiceRoleForConfig` service-linked role (`true`, default) or reference an existing one by ARN (`false`). Ignored when a custom role is used. | `bool` | `true` | no |
+| create_config_service_linked_role    | Only when `config_role_name` is empty: create the `AWSServiceRoleForConfig` service-linked role (`true`) or reference an existing one by ARN (`false`, default). Ignored when a custom role is used. | `bool` | `false` | no |
 | config_policy_name                   | Name of the inline cross-account delivery policy on the role. Org-standard, unprefixed.                     | `string`       | `"OrganizationAWSConfigDeliveryPolicy"` | no |
 | all_supported                        | ALL_SUPPORTED strategy. When `true`, `resource_types` / `excluded_resource_types` must be empty.            | `bool`         | `true`             |    no    |
 | include_global_resource_types        | Record global types (IAM, etc.). Honored only when `all_supported = true`; forced `false` otherwise.        | `bool`         | `true`             |    no    |
